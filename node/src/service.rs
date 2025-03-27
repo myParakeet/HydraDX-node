@@ -27,12 +27,7 @@ use std::{sync::Arc, time::Duration};
 
 use cumulus_client_cli::CollatorOptions;
 use cumulus_client_collator::service::CollatorService;
-use cumulus_client_consensus_common::ParachainBlockImport as TParachainBlockImport;
-use cumulus_client_consensus_proposer::Proposer;
-use cumulus_client_service::{
-	build_network, build_relay_chain_interface, prepare_node_config, start_relay_chain_tasks, BuildNetworkParams,
-	CollatorSybilResistance, DARecoveryProfile, StartRelayChainTasksParams,
-};
+use cumulus_client_service::{prepare_node_config, start_collator, start_full_node, TFullClient, TParachainBlockImport};
 use cumulus_primitives_core::{relay_chain::CollatorPair, ParaId};
 use cumulus_relay_chain_interface::{OverseerHandle, RelayChainInterface};
 
@@ -41,12 +36,13 @@ use fc_rpc_core::types::{FeeHistoryCache, FilterPool};
 use sc_client_api::Backend;
 use sc_consensus::ImportQueue;
 use sc_executor::{HeapAllocStrategy, WasmExecutor, DEFAULT_HEAP_ALLOC_STRATEGY};
-use sc_network::NetworkBlock;
+use sc_network::{NetworkBlock, Event};
 use sc_service::{Configuration, PartialComponents, TFullBackend, TFullClient, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryHandle, TelemetryWorker, TelemetryWorkerHandle};
 use sc_transaction_pool_api::OffchainTransactionPoolFactory;
 use sp_keystore::KeystorePtr;
 use std::{collections::BTreeMap, sync::Mutex, fs::OpenOptions, io::Write};
+use futures::StreamExt;
 use substrate_prometheus_endpoint::Registry;
 use tokio::time::sleep;
 
@@ -304,7 +300,6 @@ async fn start_node_impl(
 				pool: transaction_pool.clone(),
 				backend: backend.clone(),
 			};
-
 			let module = rpc::create_full(deps)?;
 			let eth_deps = rpc::Deps {
 				client: client.clone(),
@@ -385,7 +380,7 @@ async fn start_node_impl(
 					match event {
 						Event::PeerConnected(peer_id) => {
 							let peer_id_str = peer_id.to_base58();
-							if let Ok(net_state) = network_clone.network_state() {
+							if let Ok(net_state) = network_clone.network_state().await {
 								if let Some(peer) = net_state.connected_peers.get(&peer_id_str) {
 									let addresses: Vec<String> = peer.addresses.iter().map(|a| a.to_string()).collect();
 									let client_version = peer.version_string.as_deref().unwrap_or("unknown");
@@ -428,7 +423,7 @@ async fn start_node_impl(
 			None,
 			async move {
 				loop {
-					if let Ok(net_state) = network_clone2.network_state() {
+					if let Ok(net_state) = network_clone2.network_state().await {
 						for (peer_id, peer_info) in net_state.not_connected_peers.iter() {
 							let addrs: Vec<String> = peer_info.addresses.iter().map(|a| a.to_string()).collect();
 							if !addrs.is_empty() {
@@ -446,7 +441,7 @@ async fn start_node_impl(
 	// ---------------------------------------
 	// ---------------------------------------
 	// ---------------------------------------
-	
+
 	let announce_block = {
 		let sync_service = sync_service.clone();
 		Arc::new(move |hash, data| sync_service.announce_block(hash, data))
@@ -570,37 +565,169 @@ fn start_consensus(
 		para_client: client,
 		relay_client: relay_chain_interface,
 		keystore,
+		overseer_handle,
 		collator_key,
 		para_id,
-		overseer_handle,
-		relay_chain_slot_duration,
 		proposer,
 		collator_service,
 		// Very limited proposal time.
 		authoring_duration: Duration::from_millis(500),
-		collation_request_receiver: None,
+		// The instant seals block authorship has no significant transactions
+		// waiting time.
+		slot_duration: Duration::from_secs(6),
 	};
 
-	let fut = basic_aura::run::<Block, sp_consensus_aura::sr25519::AuthorityPair, _, _, _, _, _, _>(params);
-	task_manager.spawn_essential_handle().spawn("aura", None, fut);
-
-	Ok(())
+	start_collator(params).await.map_err(Into::into)
 }
 
-/// Start a parachain node.
-pub async fn start_node(
-	parachain_config: Configuration,
+/// Build the relay chain interface for interacting with the relay chain.
+async fn build_relay_chain_interface(
 	polkadot_config: Configuration,
-	ethereum_config: evm::EthereumConfig,
+	parachain_config: &Configuration,
+	telemetry_worker_handle: Option<TelemetryWorkerHandle>,
+	task_manager: &mut TaskManager,
 	collator_options: CollatorOptions,
-	para_id: ParaId,
-) -> sc_service::error::Result<(TaskManager, Arc<ParachainClient>)> {
-	start_node_impl(
-		parachain_config,
+	instant_seal: Option<Arc<dyn Fn(Hash, Option<Vec<u8>>) + Send + Sync>>,
+) -> Result<(Arc<dyn RelayChainInterface>, CollatorPair), polkadot_service::Error> {
+	use polkadot_service::PolkadotFullConfiguration;
+	use rococo_service::RelayChainNode;
+
+	let polkadot_config = PolkadotFullConfiguration {
+		network: polkadot_config.network,
+		keystore: polkadot_config.keystore,
+		database: polkadot_config.database,
+		informant_output_format: polkadot_config.informant_output_format,
+		telemetry: polkadot_config.telemetry,
+		prometheus_config: polkadot_config.prometheus_config,
+		telemetry_endpoints: polkadot_config.telemetry_endpoints,
+		tracing_targets: Default::default(),
+		tracing_receiver: Default::default(),
+		chain_spec: polkadot_config.chain_spec,
+		role: polkadot_config.role,
+		base_path: polkadot_config.base_path,
+		offchain_worker: polkadot_config.offchain_worker,
+		state_cache_size: polkadot_config.state_cache_size,
+		state_cache_child_ratio: polkadot_config.state_cache_child_ratio,
+		role_full: polkadot_config.role_full,
+	};
+
+	let collator_key = collator_options
+		.keystore
+		.read()
+		.key::<polkadot_primitives::v2::CollatorId>(&collator_pair::ID, &[])
+		.expect("Collator key not found in keystore");
+
+	let (relay_chain_interface, collator_key) = start_full_node(
 		polkadot_config,
-		ethereum_config,
-		collator_options,
-		para_id,
+		parachain_config,
+		telemetry_worker_handle,
+		task_manager,
+		collator_options.relay_chain_rpc_url.as_ref().map(String::as_str),
+		instant_seal,
 	)
-	.await
+	.await?;
+
+	Ok((relay_chain_interface, collator_key))
+}
+
+/// Creates a network configuration from the given service configuration.
+#[allow(clippy::too_many_arguments)]
+struct BuildNetworkParams<'a, P: sc_transaction_pool::ChainApi> {
+	parachain_config: &'a Configuration,
+	client: Arc<ParachainClient>,
+	transaction_pool: Arc<sc_transaction_pool::FullPool<Block, ParachainClient>>,
+	para_id: ParaId,
+	spawn_handle: sc_service::SpawnTaskHandle,
+	relay_chain_interface: Arc<dyn RelayChainInterface>,
+	import_queue: sc_consensus::DefaultImportQueue<Block>,
+	net_config: sc_network::config::FullNetworkConfiguration<Block, Hash, sc_network::NetworkWorker<Block, Hash>>,
+	sybil_resistance_level: CollatorSybilResistance,
+}
+
+/// Create a polkadot service for the network.
+async fn build_network<P: sc_transaction_pool::ChainApi>(
+	params: BuildNetworkParams<'_, P>,
+) -> sc_service::error::Result<(
+	Arc<sc_service::NetworkStarter>,
+	sc_service::SpawnTasksHandle,
+	Arc<sc_network::NetworkService<Block, Hash>>,
+	sc_service::SpawnTasksResult<Arc<sc_network::NetworkService<Block, Hash>>>,
+	sc_network::NetworkStarter,
+	sc_service::ArcDataSyncService<Block>,
+)> {
+	let parachain_config = params.parachain_config;
+	let network_params = sc_service::BuildNetworkParams {
+		config: parachain_config,
+		client: params.client,
+		transaction_pool: params.transaction_pool,
+		spawn_handle: params.spawn_handle,
+		import_queue: params.import_queue,
+		on_demand: None,
+		block_announce_validator_builder: None,
+		enable_metrics: parachain_config.prometheus_registry().is_some(),
+		warp_sync: None,
+		sybil_resistance_level: params.sybil_resistance_level,
+	};
+	let network_service = sc_service::build_network(network_params).await?;
+	let network = network_service.network.clone();
+	let sync_service = network_service.sync.clone();
+	let on_demand = network_service.on_demand;
+	Ok((
+		Arc::new(network_service.network_starter),
+		network_service.spawn_tasks_handle,
+		network_service.network,
+		network_service.spawn_tasks_result,
+		network_service.network_starter,
+		network_service.data_sync_service,
+	))
+}
+
+/// The chain specification for the parachain node.
+pub fn chain_spec() -> crate::chain_spec::ChainSpec {
+	crate::chain_spec::development_config().expect("Failed to load chain spec")
+}
+
+/// The extended network identity for a node.
+pub fn extended_network_identity(
+	network: &sc_network::NetworkService<Block, Hash>,
+) -> sc_network::NetworkPeerInfo {
+	network.identity()
+}
+
+/// The network identity for a node.
+pub fn network_identity(network: &sc_network::NetworkService<Block, Hash>) -> sc_network::NetworkPeerInfo {
+	let identity = network.identity();
+	identity
+}
+
+/// The node identity as a JSON string.
+pub fn node_identity_json(network: &sc_network::NetworkService<Block, Hash>) -> String {
+	serde_json::to_string(&network.identity()).expect("Failed to serialize node identity to JSON")
+}
+
+/// `ServiceFactory` implementation.
+pub struct ServiceFactory<E>(std::marker::PhantomData<E>);
+
+impl<E> Default for ServiceFactory<E> {
+	fn default() -> Self {
+		ServiceFactory(std::marker::PhantomData)
+	}
+}
+
+impl<E> sc_service::ServiceFactory<Block, hydradx_runtime::RuntimeApi, E> for ServiceFactory<E>
+where
+	E: sc_executor::NativeExecutionDispatch + 'static,
+{
+	fn new_service(
+		&self,
+		config: Configuration,
+	) -> sc_service::error::Result<(TaskManager, Arc<ParachainClient>)> {
+		futures::executor::block_on(start_node_impl(
+			config,
+			Default::default(),
+			evm::EthereumConfig::default(),
+			CollatorOptions::default(),
+			2000_u32.into(),
+		))
+	}
 }
