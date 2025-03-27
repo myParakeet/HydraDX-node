@@ -47,6 +47,8 @@ use sc_telemetry::{Telemetry, TelemetryHandle, TelemetryWorker, TelemetryWorkerH
 use sc_transaction_pool_api::OffchainTransactionPoolFactory;
 use sp_keystore::KeystorePtr;
 use std::{collections::BTreeMap, sync::Mutex, fs::OpenOptions, io::Write};
+use futures::StreamExt;
+use sc_network::Event;
 use substrate_prometheus_endpoint::Registry;
 use tokio::time::sleep;
 
