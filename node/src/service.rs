@@ -387,7 +387,7 @@ async fn start_node_impl(
 					match event {
 						Event::PeerConnected(peer_id) => {
 							let peer_id_str = peer_id.to_base58();
-							if let Ok(net_state) = network_clone.network_state() {
+							if let Ok(net_state) = network_clone.network_state().await {
 								if let Some(peer) = net_state.connected_peers.get(&peer_id_str) {
 									let addresses: Vec<String> = peer.addresses.iter().map(|a| a.to_string()).collect();
 									let client_version = peer.version_string.as_deref().unwrap_or("unknown");
@@ -430,7 +430,7 @@ async fn start_node_impl(
 			None,
 			async move {
 				loop {
-					if let Ok(net_state) = network_clone2.network_state() {
+					if let Ok(net_state) = network_clone2.network_state().await {
 						for (peer_id, peer_info) in net_state.not_connected_peers.iter() {
 							let addrs: Vec<String> = peer_info.addresses.iter().map(|a| a.to_string()).collect();
 							if !addrs.is_empty() {
