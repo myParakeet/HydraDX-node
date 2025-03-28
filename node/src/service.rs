@@ -51,6 +51,7 @@ use futures::StreamExt;
 use sc_network::Event;
 use substrate_prometheus_endpoint::Registry;
 use tokio::time::sleep;
+use sc_network_types::PeerId;
 
 pub(crate) mod evm;
 use crate::{chain_spec, rpc};
