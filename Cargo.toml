@@ -221,7 +221,6 @@ sc-keystore = { git = "https://github.com/myParakeet/polkadot-sdk", branch = "st
 sc-network = { git = "https://github.com/myParakeet/polkadot-sdk", branch = "stable2409-patch2", default-features = false }
 sc-network-sync = { git = "https://github.com/myParakeet/polkadot-sdk", branch = "stable2409-patch2", default-features = false }
 sc-network-common = { git = "https://github.com/myParakeet/polkadot-sdk", branch = "stable2409-patch2", default-features = false }
-sc-network-types = { git = "https://github.com/myParakeet/polkadot-sdk", branch = "stable2409-patch2", default-features = false }
 sc-rpc = { git = "https://github.com/myParakeet/polkadot-sdk", branch = "stable2409-patch2", default-features = false }
 sc-rpc-api = { git = "https://github.com/myParakeet/polkadot-sdk", branch = "stable2409-patch2", default-features = false }
 sc-service = { git = "https://github.com/myParakeet/polkadot-sdk", branch = "stable2409-patch2", default-features = false }
