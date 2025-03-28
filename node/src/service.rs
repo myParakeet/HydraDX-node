@@ -370,82 +370,84 @@ async fn start_node_impl(
 	// ---------------------------------------
 	// Open a file for writing peer info logs.
 	let peer_log_file = std::sync::Arc::new(Mutex::new(OpenOptions::new()
-		.create(true)
-		.append(true)
-		.open("peer_info.log")
-		.expect("Unable to open peer_info.log")));
-
+	    .create(true)
+	    .append(true)
+	    .open("peer_info.log")
+	    .expect("Unable to open peer_info.log")));
+	
 	{
-		// Clone network handle for logging peer events.
-		let network_clone = network.clone();
-		let peer_log_file_clone = peer_log_file.clone();
-		let mut peer_events = network_clone.event_stream("peer-logging");
-		task_manager.spawn_handle().spawn(
-			"peer-ip-logger",
-			None,
-			async move {
-				while let Some(event) = peer_events.next().await {
-					match event {
-						Event::PeerConnected(peer_id) => {
-							let peer_id_str = peer_id.to_base58();
-							if let Ok(net_state) = network_clone.network_state().await {
-								if let Some(peer) = net_state.connected_peers.get(&peer_id_str) {
-									let addresses: Vec<String> = peer.addresses.iter().map(|a| a.to_string()).collect();
-									let client_version = peer.version_string.as_deref().unwrap_or("unknown");
-									let log_line = format!("🌐 Peer connected: id={} addresses={:?} client={}\n", peer_id, addresses, client_version);
-									let mut file = peer_log_file_clone.lock().unwrap();
-									file.write_all(log_line.as_bytes()).unwrap();
-								} else {
-									let log_line = format!("🌐 Peer connected: id={}\n", peer_id);
-									let mut file = peer_log_file_clone.lock().unwrap();
-									file.write_all(log_line.as_bytes()).unwrap();
-								}
-							}
-						}
-						Event::PeerDisconnected(peer_id) => {
-							let log_line = format!("Peer disconnected: id={}\n", peer_id);
-							let mut file = peer_log_file_clone.lock().unwrap();
-							file.write_all(log_line.as_bytes()).unwrap();
-						}
-						Event::NotificationStreamOpened { protocol, remote, info } => {
-							let log_line = format!("Protocol stream opened with {} (protocol: {}) – info: {:?}\n", remote, protocol, info);
-							let mut file = peer_log_file_clone.lock().unwrap();
-							file.write_all(log_line.as_bytes()).unwrap();
-						}
-						Event::Dht(dht_event) => {
-							let log_line = format!("DHT event: {:?}\n", dht_event);
-							let mut file = peer_log_file_clone.lock().unwrap();
-							file.write_all(log_line.as_bytes()).unwrap();
-						}
-						_ => {}
-					}
-				}
-			}
-		);
-
-		// Periodically log discovered peers that are not connected.
-		let network_clone2 = network.clone();
-		let peer_log_file_clone2 = peer_log_file.clone();
-		task_manager.spawn_handle().spawn(
-			"peer-discovery-logger",
-			None,
-			async move {
-				loop {
-					if let Ok(net_state) = network_clone2.network_state().await {
-						for (peer_id, peer_info) in net_state.not_connected_peers.iter() {
-							let addrs: Vec<String> = peer_info.addresses.iter().map(|a| a.to_string()).collect();
-							if !addrs.is_empty() {
-								let log_line = format!("🔍 Discovered peer (not connected): id={} addresses={:?}\n", peer_id, addrs);
-								let mut file = peer_log_file_clone2.lock().unwrap();
-								file.write_all(log_line.as_bytes()).unwrap();
-							}
-						}
-					}
-					sleep(Duration::from_secs(60)).await;
-				}
-			}
-		);
+	    // Clone network handle for logging peer events.
+	    let network_clone = network.clone();
+	    let peer_log_file_clone = peer_log_file.clone();
+	    let mut peer_events = network_clone.event_stream("peer-logging");
+	    task_manager.spawn_handle().spawn(
+	        "peer-ip-logger",
+	        None,
+	        async move {
+	            while let Some(event) = peer_events.next().await {
+	                match event {
+	                    // Use NotificationStreamOpened as a proxy for a peer connection.
+	                    Event::NotificationStreamOpened { protocol, remote, .. } => {
+	                        let peer_id_str = remote.to_base58();
+	                        if let Ok(net_state) = network_clone.network_state().await {
+	                            if let Some(peer) = net_state.connected_peers.get(&peer_id_str) {
+	                                let addresses: Vec<String> = peer.known_addresses.iter()
+	                                    .map(|a| a.to_string()).collect();
+	                                let client_version = peer.version_string.as_deref().unwrap_or("unknown");
+	                                let log_line = format!("🌐 Peer connected: id={} addresses={:?} client={}\n", 
+	                                    remote, addresses, client_version);
+	                                let mut file = peer_log_file_clone.lock().unwrap();
+	                                file.write_all(log_line.as_bytes()).unwrap();
+	                            } else {
+	                                let log_line = format!("🌐 Peer connected: id={}\n", remote);
+	                                let mut file = peer_log_file_clone.lock().unwrap();
+	                                file.write_all(log_line.as_bytes()).unwrap();
+	                            }
+	                        }
+	                    },
+	                    // Use NotificationStreamClosed as a proxy for a peer disconnection.
+	                    Event::NotificationStreamClosed { remote, protocol } => {
+	                        let log_line = format!("Peer disconnected: id={} (protocol: {})\n", remote, protocol);
+	                        let mut file = peer_log_file_clone.lock().unwrap();
+	                        file.write_all(log_line.as_bytes()).unwrap();
+	                    },
+	                    Event::Dht(dht_event) => {
+	                        let log_line = format!("DHT event: {:?}\n", dht_event);
+	                        let mut file = peer_log_file_clone.lock().unwrap();
+	                        file.write_all(log_line.as_bytes()).unwrap();
+	                    },
+	                    _ => {}
+	                }
+	            }
+	        }
+	    );
+	
+	    // Periodically log discovered peers that are not connected.
+	    let network_clone2 = network.clone();
+	    let peer_log_file_clone2 = peer_log_file.clone();
+	    task_manager.spawn_handle().spawn(
+	        "peer-discovery-logger",
+	        None,
+	        async move {
+	            loop {
+	                if let Ok(net_state) = network_clone2.network_state().await {
+	                    for (peer_id, peer_info) in net_state.not_connected_peers.iter() {
+	                        let addrs: Vec<String> = peer_info.known_addresses.iter()
+	                            .map(|a| a.to_string()).collect();
+	                        if !addrs.is_empty() {
+	                            let log_line = format!("🔍 Discovered peer (not connected): id={} addresses={:?}\n", 
+	                                peer_id, addrs);
+	                            let mut file = peer_log_file_clone2.lock().unwrap();
+	                            file.write_all(log_line.as_bytes()).unwrap();
+	                        }
+	                    }
+	                }
+	                sleep(Duration::from_secs(60)).await;
+	            }
+	        }
+	    );
 	}
+
 	// ---------------------------------------
 	// ---------------------------------------
 	// ---------------------------------------
