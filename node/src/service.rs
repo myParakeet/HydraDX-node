@@ -388,22 +388,24 @@ async fn start_node_impl(
 	                match event {
 	                    // Use NotificationStreamOpened as a proxy for a peer connection.
 	                    Event::NotificationStreamOpened { protocol, remote, .. } => {
-	                        if let Some(peer) = net_state.connected_peers.get(&peer_id_str) {
-				    let addresses: Vec<String> = peer.known_addresses.iter()
-				        .map(|a| a.to_string()).collect();
-				    let endpoint = &peer.endpoint;
-				    let client_version = peer.version_string.as_deref().unwrap_or("unknown");
-				    let log_line = format!(
-				        "🌐 Peer connected: id={} endpoint={:?} addresses={:?} client={}\n", 
-				        remote, endpoint, addresses, client_version
-				    );
-				    let mut file = peer_log_file_clone.lock().unwrap();
-				    file.write_all(log_line.as_bytes()).unwrap();
-				} else {
-				    let log_line = format!("🌐 Peer connected: id={}\n", remote);
-				    let mut file = peer_log_file_clone.lock().unwrap();
-				    file.write_all(log_line.as_bytes()).unwrap();
-				}
+	                        let peer_id_str = remote.to_base58();
+	                        if let Ok(net_state) = network_clone.network_state().await {
+	                            if let Some(peer) = net_state.connected_peers.get(&peer_id_str) {
+	                                let addresses: Vec<String> = peer.known_addresses.iter()
+	                                    .map(|a| a.to_string()).collect();
+	                                let endpoint = &peer.endpoint;
+	                                let client_version = peer.version_string.as_deref().unwrap_or("unknown");
+	                                let log_line = format!(
+	                                    "🌐 Peer connected: id={} endpoint={:?} addresses={:?} client={}\n", 
+	                                    remote, endpoint, addresses, client_version
+	                                );
+	                                let mut file = peer_log_file_clone.lock().unwrap();
+	                                file.write_all(log_line.as_bytes()).unwrap();
+	                            } else {
+	                                let log_line = format!("🌐 Peer connected: id={}\n", remote);
+	                                let mut file = peer_log_file_clone.lock().unwrap();
+	                                file.write_all(log_line.as_bytes()).unwrap();
+	                            }
 	                        }
 	                    },
 	                    // Use NotificationStreamClosed as a proxy for a peer disconnection.
@@ -447,8 +449,7 @@ async fn start_node_impl(
 	            }
 	        }
 	    );
-	}
-
+	} // End of the logging block.
 	// ---------------------------------------
 	// ---------------------------------------
 	// ---------------------------------------
